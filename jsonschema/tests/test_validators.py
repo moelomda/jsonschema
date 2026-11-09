@@ -309,18 +309,41 @@ class TestCreateAndExtend(TestCase):
 
 
 class TestValidationErrorMessages(TestCase):
-    def message_for(self, instance, schema, *args, **kwargs):
-        cls = kwargs.pop("cls", validators._LATEST_VERSION)
-        cls.check_schema(schema)
-        validator = cls(schema, *args, **kwargs)
-        errors = list(validator.iter_errors(instance))
-        self.assertTrue(errors, msg=f"No errors were raised for {instance!r}")
-        self.assertEqual(
-            len(errors),
-            1,
-            msg=f"Expected exactly one error, found {errors!r}",
-        )
-        return errors[0].message
+    ALL_DRAFTS = (
+        validators.Draft3Validator,
+        validators.Draft4Validator,
+        validators.Draft6Validator,
+        validators.Draft7Validator,
+        validators.Draft201909Validator,
+        validators.Draft202012Validator,
+    )
+    DRAFT4_AND_LATER = ALL_DRAFTS[1:]
+    DRAFT6_AND_LATER = ALL_DRAFTS[2:]
+    DRAFT201909_AND_LATER = ALL_DRAFTS[4:]
+    BEFORE_202012 = ALL_DRAFTS[:-1]
+
+    def message_for(
+        self, instance, schema, *args, drafts=ALL_DRAFTS, **kwargs,
+    ):
+        message = None
+        for cls in drafts:
+            with self.subTest(draft=cls.__name__):
+                cls.check_schema(schema)
+                validator = cls(schema, *args, **kwargs)
+                errors = list(validator.iter_errors(instance))
+                self.assertTrue(
+                    errors, msg=f"No errors were raised for {instance!r}",
+                )
+                self.assertEqual(
+                    len(errors),
+                    1,
+                    msg=f"Expected exactly one error, found {errors!r}",
+                )
+                if message is None:
+                    message = errors[0].message
+                else:
+                    self.assertEqual(errors[0].message, message)
+        return message
 
     def test_single_type_failure(self):
         message = self.message_for(instance=1, schema={"type": "string"})
@@ -340,7 +363,7 @@ class TestValidationErrorMessages(TestCase):
         message = self.message_for(
             instance=1,
             schema=schema,
-            cls=validators.Draft3Validator,
+            drafts=(validators.Draft3Validator,),
         )
         self.assertEqual(message, "1 is not of type 'Foo'")
 
@@ -358,7 +381,7 @@ class TestValidationErrorMessages(TestCase):
         message = self.message_for(
             instance={"bar": 2},
             schema=schema,
-            cls=validators.Draft3Validator,
+            drafts=(validators.Draft3Validator,),
         )
         self.assertEqual(message, "'foo' is a dependency of 'bar'")
 
@@ -367,7 +390,7 @@ class TestValidationErrorMessages(TestCase):
         message = self.message_for(
             instance=1,
             schema={"type": [type]},
-            cls=validators.Draft3Validator,
+            drafts=(validators.Draft3Validator,),
         )
         self.assertEqual(
             message,
@@ -380,33 +403,33 @@ class TestValidationErrorMessages(TestCase):
         message = self.message_for(
             instance={"bar": 2},
             schema=schema,
-            cls=validators.Draft3Validator,
+            drafts=(validators.Draft3Validator,),
         )
         self.assertEqual(message, "'foo' is a dependency of 'bar'")
 
-    def test_dependencies_list_draft7(self):
+    def test_dependencies_list_draft4_draft6_draft7(self):
         depend, on = "bar", "foo"
         schema = {"dependencies": {depend: [on]}}
         message = self.message_for(
             instance={"bar": 2},
             schema=schema,
-            cls=validators.Draft7Validator,
+            drafts=self.ALL_DRAFTS[1:4],
         )
         self.assertEqual(message, "'foo' is a dependency of 'bar'")
 
     def test_additionalItems_single_failure(self):
         message = self.message_for(
-            instance=[2],
-            schema={"items": [], "additionalItems": False},
-            cls=validators.Draft3Validator,
+            instance=[0, 2],
+            schema={"items": [{}], "additionalItems": False},
+            drafts=self.BEFORE_202012,
         )
         self.assertIn("(2 was unexpected)", message)
 
     def test_additionalItems_multiple_failures(self):
         message = self.message_for(
-            instance=[1, 2, 3],
-            schema={"items": [], "additionalItems": False},
-            cls=validators.Draft3Validator,
+            instance=[0, 1, 2, 3],
+            schema={"items": [{}], "additionalItems": False},
+            drafts=self.BEFORE_202012,
         )
         self.assertIn("(1, 2, 3 were unexpected)", message)
 
@@ -431,16 +454,17 @@ class TestValidationErrorMessages(TestCase):
         schema = {"const": 12}
         message = self.message_for(
             instance={"foo": "bar"},
+            drafts=self.DRAFT6_AND_LATER,
             schema=schema,
         )
         self.assertIn("12 was expected", message)
 
-    def test_contains_draft_6(self):
+    def test_contains_draft6_draft7(self):
         schema = {"contains": {"const": 12}}
         message = self.message_for(
             instance=[2, {}, []],
             schema=schema,
-            cls=validators.Draft6Validator,
+            drafts=self.ALL_DRAFTS[2:4],
         )
         self.assertEqual(
             message,
@@ -474,7 +498,6 @@ class TestValidationErrorMessages(TestCase):
         message = self.message_for(
             instance={"zebra": 123},
             schema=schema,
-            cls=validators.Draft4Validator,
         )
         self.assertEqual(
             message,
@@ -487,7 +510,6 @@ class TestValidationErrorMessages(TestCase):
         message = self.message_for(
             instance={"zebra": 123, "fish": 456},
             schema=schema,
-            cls=validators.Draft4Validator,
         )
         self.assertEqual(
             message,
@@ -502,6 +524,7 @@ class TestValidationErrorMessages(TestCase):
     def test_False_schema(self):
         message = self.message_for(
             instance="something",
+            drafts=self.DRAFT6_AND_LATER,
             schema=False,
         )
         self.assertEqual(message, "False schema does not allow 'something'")
@@ -509,6 +532,7 @@ class TestValidationErrorMessages(TestCase):
     def test_multipleOf(self):
         message = self.message_for(
             instance=3,
+            drafts=self.DRAFT4_AND_LATER,
             schema={"multipleOf": 2},
         )
         self.assertEqual(message, "3 is not a multiple of 2")
@@ -552,12 +576,17 @@ class TestValidationErrorMessages(TestCase):
         self.assertEqual(message, "'abc' is expected to be empty")
 
     def test_minProperties(self):
-        message = self.message_for(instance={}, schema={"minProperties": 2})
+        message = self.message_for(
+            instance={},
+            drafts=self.DRAFT4_AND_LATER,
+            schema={"minProperties": 2},
+        )
         self.assertEqual(message, "{} does not have enough properties")
 
     def test_maxProperties(self):
         message = self.message_for(
             instance={"a": {}, "b": {}, "c": {}},
+            drafts=self.DRAFT4_AND_LATER,
             schema={"maxProperties": 2},
         )
         self.assertEqual(
@@ -566,12 +595,17 @@ class TestValidationErrorMessages(TestCase):
         )
 
     def test_minProperties_1(self):
-        message = self.message_for(instance={}, schema={"minProperties": 1})
+        message = self.message_for(
+            instance={},
+            drafts=self.DRAFT4_AND_LATER,
+            schema={"minProperties": 1},
+        )
         self.assertEqual(message, "{} should be non-empty")
 
     def test_maxProperties_0(self):
         message = self.message_for(
             instance={1: 2},
+            drafts=self.DRAFT4_AND_LATER,
             schema={"maxProperties": 0},
         )
         self.assertEqual(message, "{1: 2} is expected to be empty")
@@ -579,6 +613,7 @@ class TestValidationErrorMessages(TestCase):
     def test_prefixItems_with_items(self):
         message = self.message_for(
             instance=[1, 2, "foo"],
+            drafts=(validators.Draft202012Validator,),
             schema={"items": False, "prefixItems": [{}, {}]},
         )
         self.assertEqual(
@@ -589,6 +624,7 @@ class TestValidationErrorMessages(TestCase):
     def test_prefixItems_with_multiple_extra_items(self):
         message = self.message_for(
             instance=[1, 2, "foo", 5],
+            drafts=(validators.Draft202012Validator,),
             schema={"items": False, "prefixItems": [{}, {}]},
         )
         self.assertEqual(
@@ -606,6 +642,7 @@ class TestValidationErrorMessages(TestCase):
     def test_does_not_contain(self):
         message = self.message_for(
             instance=[],
+            drafts=self.DRAFT201909_AND_LATER,
             schema={"contains": {"type": "string"}},
         )
         self.assertEqual(
@@ -616,6 +653,7 @@ class TestValidationErrorMessages(TestCase):
     def test_contains_too_few(self):
         message = self.message_for(
             instance=["foo", 1],
+            drafts=self.DRAFT201909_AND_LATER,
             schema={"contains": {"type": "string"}, "minContains": 2},
         )
         self.assertEqual(
@@ -627,6 +665,7 @@ class TestValidationErrorMessages(TestCase):
     def test_contains_too_few_both_constrained(self):
         message = self.message_for(
             instance=["foo", 1],
+            drafts=self.DRAFT201909_AND_LATER,
             schema={
                 "contains": {"type": "string"},
                 "minContains": 2,
@@ -642,6 +681,7 @@ class TestValidationErrorMessages(TestCase):
     def test_contains_too_many(self):
         message = self.message_for(
             instance=["foo", "bar", "baz"],
+            drafts=self.DRAFT201909_AND_LATER,
             schema={"contains": {"type": "string"}, "maxContains": 2},
         )
         self.assertEqual(
@@ -652,6 +692,7 @@ class TestValidationErrorMessages(TestCase):
     def test_contains_too_many_both_constrained(self):
         message = self.message_for(
             instance=["foo"] * 5,
+            drafts=self.DRAFT201909_AND_LATER,
             schema={
                 "contains": {"type": "string"},
                 "minContains": 2,
@@ -666,6 +707,7 @@ class TestValidationErrorMessages(TestCase):
     def test_exclusiveMinimum(self):
         message = self.message_for(
             instance=3,
+            drafts=self.DRAFT6_AND_LATER,
             schema={"exclusiveMinimum": 5},
         )
         self.assertEqual(
@@ -674,37 +716,58 @@ class TestValidationErrorMessages(TestCase):
         )
 
     def test_exclusiveMaximum(self):
-        message = self.message_for(instance=3, schema={"exclusiveMaximum": 2})
+        message = self.message_for(
+            instance=3,
+            drafts=self.DRAFT6_AND_LATER,
+            schema={"exclusiveMaximum": 2},
+        )
         self.assertEqual(
             message,
             "3 is greater than or equal to the maximum of 2",
         )
 
     def test_required(self):
-        message = self.message_for(instance={}, schema={"required": ["foo"]})
+        message = self.message_for(
+            instance={},
+            drafts=self.DRAFT4_AND_LATER,
+            schema={"required": ["foo"]},
+        )
         self.assertEqual(message, "'foo' is a required property")
 
     def test_dependentRequired(self):
         message = self.message_for(
             instance={"foo": {}},
+            drafts=self.DRAFT201909_AND_LATER,
             schema={"dependentRequired": {"foo": ["bar"]}},
         )
         self.assertEqual(message, "'bar' is a dependency of 'foo'")
 
     def test_oneOf_matches_none(self):
-        message = self.message_for(instance={}, schema={"oneOf": [False]})
+        message = self.message_for(
+            instance={},
+            drafts=self.DRAFT6_AND_LATER,
+            schema={"oneOf": [False]},
+        )
         self.assertEqual(
             message,
             "{} is not valid under any of the given schemas",
         )
 
     def test_oneOf_matches_too_many(self):
-        message = self.message_for(instance={}, schema={"oneOf": [True, True]})
+        message = self.message_for(
+            instance={},
+            drafts=self.DRAFT6_AND_LATER,
+            schema={"oneOf": [True, True]},
+        )
         self.assertEqual(message, "{} is valid under each of True, True")
 
     def test_unevaluated_items(self):
         schema = {"type": "array", "unevaluatedItems": False}
-        message = self.message_for(instance=["foo", "bar"], schema=schema)
+        message = self.message_for(
+            instance=["foo", "bar"],
+            drafts=self.DRAFT201909_AND_LATER,
+            schema=schema,
+        )
         self.assertIn(
             message,
             "Unevaluated items are not allowed ('foo', 'bar' were unexpected)",
@@ -712,7 +775,11 @@ class TestValidationErrorMessages(TestCase):
 
     def test_unevaluated_items_on_invalid_type(self):
         schema = {"type": "array", "unevaluatedItems": False}
-        message = self.message_for(instance="foo", schema=schema)
+        message = self.message_for(
+            instance="foo",
+            drafts=self.DRAFT201909_AND_LATER,
+            schema=schema,
+        )
         self.assertEqual(message, "'foo' is not of type 'array'")
 
     def test_unevaluated_properties_invalid_against_subschema(self):
@@ -726,6 +793,7 @@ class TestValidationErrorMessages(TestCase):
                 "bar": "bar",
                 "baz": 12,
             },
+            drafts=self.DRAFT201909_AND_LATER,
             schema=schema,
         )
         self.assertEqual(
@@ -741,6 +809,7 @@ class TestValidationErrorMessages(TestCase):
                 "foo": "foo",
                 "bar": "bar",
             },
+            drafts=self.DRAFT201909_AND_LATER,
             schema=schema,
         )
         self.assertEqual(
@@ -751,13 +820,18 @@ class TestValidationErrorMessages(TestCase):
 
     def test_unevaluated_properties_on_invalid_type(self):
         schema = {"type": "object", "unevaluatedProperties": False}
-        message = self.message_for(instance="foo", schema=schema)
+        message = self.message_for(
+            instance="foo",
+            drafts=self.DRAFT201909_AND_LATER,
+            schema=schema,
+        )
         self.assertEqual(message, "'foo' is not of type 'object'")
 
     def test_single_item(self):
         schema = {"prefixItems": [{}], "items": False}
         message = self.message_for(
             instance=["foo", "bar", "baz"],
+            drafts=(validators.Draft202012Validator,),
             schema=schema,
         )
         self.assertEqual(
@@ -770,7 +844,7 @@ class TestValidationErrorMessages(TestCase):
         message = self.message_for(
             instance=["foo", "bar", 37],
             schema=schema,
-            cls=validators.Draft7Validator,
+            drafts=self.BEFORE_202012,
         )
         self.assertEqual(
             message,
@@ -781,6 +855,7 @@ class TestValidationErrorMessages(TestCase):
         schema = {"prefixItems": [{}], "items": False}
         message = self.message_for(
             instance=["foo", "bar", 37],
+            drafts=(validators.Draft202012Validator,),
             schema=schema,
         )
         self.assertEqual(
@@ -792,6 +867,7 @@ class TestValidationErrorMessages(TestCase):
         schema = {"prefixItems": [{}], "unevaluatedItems": False}
         message = self.message_for(
             instance=["foo", "bar", 37],
+            drafts=(validators.Draft202012Validator,),
             schema=schema,
         )
         self.assertEqual(
@@ -820,6 +896,7 @@ class TestValidationErrorMessages(TestCase):
         schema = {"properties": {"foo": {}}, "unevaluatedProperties": False}
         message = self.message_for(
             instance={"foo": {}, "a": "baz", 37: 12},
+            drafts=self.DRAFT201909_AND_LATER,
             schema=schema,
         )
         self.assertEqual(
